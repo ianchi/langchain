@@ -18,6 +18,7 @@ from typing import (
 import numpy as np
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.runnables import run_in_executor
 from langchain_core.vectorstores import VectorStore
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,7 @@ from langchain_community.vectorstores.utils import maximal_marginal_relevance
 
 if TYPE_CHECKING:
     from azure.cosmos import ContainerProxy, CosmosClient
+    from azure.cosmos.aio import CosmosClient as AsyncCosmosClient
     from azure.identity import DefaultAzureCredential
 
 USER_AGENT = ("LangChain-CDBNoSql-VectorStore-Python",)
@@ -82,6 +84,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         ] = "metadata",
         create_container: bool = True,
         full_text_search_enabled: bool = False,
+        async_cosmos_client: Optional[AsyncCosmosClient] = None,
     ):
         """
         Constructor for AzureCosmosDBNoSqlVectorSearch
@@ -113,8 +116,11 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
 
             create_container: Set to true if the container does not exist.
             full_text_search_enabled: Set to true if the full text search is enabled.
+            async_cosmos_client: used in async calls to have real async connection.
+                If not provided, the sync connection will be used in a thread pool.
         """
         self._cosmos_client = cosmos_client
+        self._async_cosmos_client = async_cosmos_client
         self._database_name = database_name
         self._container_name = container_name
         self._embedding = embedding
@@ -237,12 +243,16 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
                 full_text_policy=self._full_text_policy,
             )
         else:
-            self._database = self._cosmos_client.get_database_client(
+            self._container = self._cosmos_client.get_database_client(
                 database=self._database_name
-            )
-            self._container = self._database.get_container_client(
-                container=self._container_name
-            )
+            ).get_container_client(container=self._container_name)
+
+        if self._async_cosmos_client:
+            self._async_container = self._async_cosmos_client.get_database_client(
+                database=self._database_name
+            ).get_container_client(container=self._container_name)
+        else:
+            self._async_container = None
 
     def add_texts(
         self,
@@ -422,6 +432,16 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
             self.delete_document_by_id(document_id)
         return True
 
+    async def adelete(
+        self, ids: Optional[List[str]] = None, **kwargs: Any
+    ) -> Optional[bool]:
+        if ids is None:
+            raise ValueError("No document ids provided to delete.")
+
+        for document_id in ids:
+            await self.adelete_document_by_id(document_id)
+        return True
+
     def delete_document_by_id(self, document_id: Optional[str] = None) -> None:
         """Removes a Specific Document by id
 
@@ -431,6 +451,18 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         if document_id is None:
             raise ValueError("No document ids provided to delete.")
         self._container.delete_item(document_id, partition_key=document_id)
+
+    async def adelete_document_by_id(self, document_id: Optional[str] = None) -> None:
+        """Removes a Specific Document by id
+
+        Args:
+            document_id: The document identifier
+        """
+        if document_id is None:
+            raise ValueError("No document ids provided to delete.")
+        if self._async_container is None:
+            return await run_in_executor(None, self.delete_document_by_id, document_id)
+        await self._async_container.delete_item(document_id, partition_key=document_id)
 
     def similarity_search_with_score(
         self,
@@ -446,6 +478,31 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         embeddings = self._embedding.embed_query(query)
 
         return self.similarity_search_with_score_by_vector(
+            embedding=embeddings,
+            k=k,
+            search_text=query,
+            query_type=query_type,
+            with_embedding=with_embedding,
+            pre_filter=pre_filter,
+            offset_limit=offset_limit,
+            where=where,
+            **kwargs,
+        )
+
+    async def asimilarity_search_with_score(
+        self,
+        query: str,
+        k: int = 4,
+        pre_filter: Optional[PreFilter] = None,
+        with_embedding: bool = False,
+        query_type: CosmosDBQueryType = CosmosDBQueryType.VECTOR,
+        offset_limit: Optional[str] = None,
+        where: Optional[str] = None,
+        **kwargs: Any,
+    ) -> List[Tuple[Document, float]]:
+        embeddings = await self._embedding.aembed_query(query)
+
+        return await self.asimilarity_search_with_score_by_vector(
             embedding=embeddings,
             k=k,
             search_text=query,
@@ -485,7 +542,51 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
             query_type=query_type,
             parameters=parameters,
             with_embedding=with_embedding,
-            projection_mapping=kwargs.get("projection_mapping"),
+        )
+
+    async def asimilarity_search_with_score_by_vector(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        pre_filter: Optional[PreFilter] = None,
+        with_embedding: bool = False,
+        query_type: CosmosDBQueryType = CosmosDBQueryType.VECTOR,
+        offset_limit: Optional[str] = None,
+        where: Optional[str] = None,
+        search_text: Optional[str] = None,
+        **kwargs: Any,
+    ) -> List[Tuple[Document, float]]:
+        if not self._async_container:
+            return await run_in_executor(
+                None,
+                self.similarity_search_with_score_by_vector,
+                embedding=embedding,
+                k=k,
+                pre_filter=pre_filter,
+                with_embedding=with_embedding,
+                query_type=query_type,
+                offset_limit=offset_limit,
+                where=where,
+                search_text=search_text,
+                **kwargs,
+            )
+
+        query, parameters = self._construct_query(
+            k=k,
+            search_text=search_text,
+            query_type=query_type,
+            embeddings=embedding,
+            pre_filter=pre_filter,
+            offset_limit=offset_limit,
+            where=where,
+            **kwargs,
+        )
+
+        return await self._aexecute_query(
+            query=query,
+            query_type=query_type,
+            parameters=parameters,
+            with_embedding=with_embedding,
         )
 
     def similarity_search(
@@ -500,6 +601,30 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         **kwargs: Any,
     ) -> List[Document]:
         docs_and_scores = self.similarity_search_with_score(
+            query,
+            k=k,
+            pre_filter=pre_filter,
+            with_embedding=with_embedding,
+            query_type=query_type,
+            offset_limit=offset_limit,
+            where=where,
+            **kwargs,
+        )
+
+        return [doc for doc, _ in docs_and_scores]
+
+    async def asimilarity_search(
+        self,
+        query: str,
+        k: int = 4,
+        pre_filter: Optional[PreFilter] = None,
+        with_embedding: bool = False,
+        query_type: CosmosDBQueryType = CosmosDBQueryType.VECTOR,
+        offset_limit: Optional[str] = None,
+        where: Optional[str] = None,
+        **kwargs: Any,
+    ) -> List[Document]:
+        docs_and_scores = await self.asimilarity_search_with_score(
             query,
             k=k,
             pre_filter=pre_filter,
@@ -544,6 +669,38 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         mmr_docs = [docs_and_scores[i][0] for i in mmr_doc_indexes]
         return mmr_docs
 
+    async def amax_marginal_relevance_search_by_vector(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        query_type: CosmosDBQueryType = CosmosDBQueryType.VECTOR,
+        pre_filter: Optional[PreFilter] = None,
+        with_embedding: bool = False,
+        where: Optional[str] = None,
+        **kwargs: Any,
+    ) -> List[Document]:
+        docs_and_scores = await self.asimilarity_search_with_score_by_vector(
+            embedding=embedding,
+            k=fetch_k,
+            query_type=query_type,
+            pre_filter=pre_filter,
+            with_embedding=with_embedding,
+            where=where,
+        )
+
+        # Re-ranks the docs using MMR
+        mmr_doc_indexes = maximal_marginal_relevance(
+            np.array(embedding),
+            [doc.metadata[self._embedding_key] for doc, _ in docs_and_scores],
+            k=k,
+            lambda_mult=lambda_mult,
+        )
+
+        mmr_docs = [docs_and_scores[i][0] for i in mmr_doc_indexes]
+        return mmr_docs
+
     def max_marginal_relevance_search(
         self,
         query: str,
@@ -561,6 +718,34 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         embeddings = self._embedding.embed_query(query)
 
         docs = self.max_marginal_relevance_search_by_vector(
+            embeddings,
+            k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            pre_filter=pre_filter,
+            query_type=query_type,
+            with_embedding=with_embedding,
+            where=where,
+        )
+        return docs
+
+    async def amax_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        query_type: CosmosDBQueryType = CosmosDBQueryType.VECTOR,
+        pre_filter: Optional[PreFilter] = None,
+        with_embedding: bool = False,
+        where: Optional[str] = None,
+        **kwargs: Any,
+    ) -> List[Document]:
+        # compute the embeddings vector from the query string
+
+        embeddings = await self._embedding.aembed_query(query)
+
+        docs = await self.amax_marginal_relevance_search_by_vector(
             embeddings,
             k=k,
             fetch_k=fetch_k,
@@ -774,14 +959,41 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         query_type: CosmosDBQueryType,
         parameters: List[Dict[str, Any]],
         with_embedding: bool,
-        projection_mapping: Optional[Dict[str, Any]],
     ) -> List[Tuple[Document, float]]:
-        docs_and_scores: List[Tuple[Document, float]] = []
         items = list(
             self._container.query_items(
                 query=query, parameters=parameters, enable_cross_partition_query=True
             )
         )
+
+        return self._items_to_documents(items, with_embedding, query_type)
+
+    async def _aexecute_query(
+        self,
+        query: str,
+        query_type: CosmosDBQueryType,
+        parameters: List[Dict[str, Any]],
+        with_embedding: bool,
+    ) -> List[Tuple[Document, float]]:
+        if self._async_container is None:
+            raise ValueError(
+                "Async CosmosDB client is not provided for async execution."
+            )
+
+        results = self._async_container.query_items(
+            query=query, parameters=parameters, enable_cross_partition_query=True
+        )
+        items = [item async for item in results]
+
+        return self._items_to_documents(items, with_embedding, query_type)
+
+    def _items_to_documents(
+        self,
+        items: List[Dict[str, Any]],
+        with_embedding: bool,
+        query_type: CosmosDBQueryType,
+    ) -> List[Tuple[Document, float]]:
+        docs_and_scores: List[Tuple[Document, float]] = []
         for item in items:
             text = item["text"]
             metadata = item.get("metadata", {})
