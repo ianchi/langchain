@@ -50,6 +50,7 @@ class CosmosDBQueryType(str, Enum):
     FULL_TEXT_SEARCH = "full_text_search"
     FULL_TEXT_RANK = "full_text_rank"
     HYBRID = "hybrid"
+    PLAIN = "plain"  # For simple queries only metadata filter
 
 
 class AzureCosmosDBNoSqlVectorSearch(VectorStore):
@@ -475,7 +476,11 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         where: Optional[str] = None,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
-        embeddings = self._embedding.embed_query(query)
+        embeddings = (
+            self._embedding.embed_query(query)
+            if query_type in [CosmosDBQueryType.VECTOR, CosmosDBQueryType.HYBRID]
+            else []
+        )
 
         return self.similarity_search_with_score_by_vector(
             embedding=embeddings,
@@ -500,7 +505,11 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         where: Optional[str] = None,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
-        embeddings = await self._embedding.aembed_query(query)
+        embeddings = (
+            await self._embedding.aembed_query(query)
+            if query_type in [CosmosDBQueryType.VECTOR, CosmosDBQueryType.HYBRID]
+            else []
+        )
 
         return await self.asimilarity_search_with_score_by_vector(
             embedding=embeddings,
@@ -715,7 +724,11 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
     ) -> List[Document]:
         # compute the embeddings vector from the query string
 
-        embeddings = self._embedding.embed_query(query)
+        embeddings = (
+            self._embedding.embed_query(query)
+            if query_type in [CosmosDBQueryType.VECTOR, CosmosDBQueryType.HYBRID]
+            else []
+        )
 
         docs = self.max_marginal_relevance_search_by_vector(
             embeddings,
@@ -743,7 +756,11 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
     ) -> List[Document]:
         # compute the embeddings vector from the query string
 
-        embeddings = await self._embedding.aembed_query(query)
+        embeddings = (
+            self._embedding.embed_query(query)
+            if query_type in [CosmosDBQueryType.VECTOR, CosmosDBQueryType.HYBRID]
+            else []
+        )
 
         docs = await self.amax_marginal_relevance_search_by_vector(
             embeddings,
@@ -767,6 +784,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         offset_limit: Optional[str] = None,
         projection_mapping: Optional[Dict[str, Any]] = None,
         where: Optional[str] = None,
+        order_by: Optional[str] = None,
     ) -> Tuple[str, List[Dict[str, Any]]]:
         if query_type not in CosmosDBQueryType.__members__.values():
             raise ValueError(
@@ -809,6 +827,16 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
             query += f""" ORDER BY RANK RRF(FullTextScore(c.{self._text_key}, 
             [{", ".join(f"'{term}'" for term in search_text.split())}]), 
             VectorDistance(c.{self._embedding_key}, {embeddings}))"""
+        elif query_type == CosmosDBQueryType.PLAIN:
+            if search_text or embeddings:
+                raise ValueError(
+                    "search text or embeddings cannot be used with PLAIN queries."
+                )
+            if order_by:
+                query += f" ORDER BY {order_by}"
+
+        if order_by and query_type != CosmosDBQueryType.PLAIN:
+            raise ValueError("order_by clause can only be used with PLAIN queries.")
 
         # Add limit_offset_clause if specified
         if offset_limit is not None:
