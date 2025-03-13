@@ -988,11 +988,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         parameters: List[Dict[str, Any]],
         with_embedding: bool,
     ) -> List[Tuple[Document, float]]:
-        items = list(
-            self._container.query_items(
-                query=query, parameters=parameters, enable_cross_partition_query=True
-            )
-        )
+        items = list(self._container.query_items(query=query, parameters=parameters))
 
         return self._items_to_documents(items, with_embedding, query_type)
 
@@ -1008,9 +1004,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
                 "Async CosmosDB client is not provided for async execution."
             )
 
-        results = self._async_container.query_items(
-            query=query, parameters=parameters, enable_cross_partition_query=True
-        )
+        results = self._async_container.query_items(query=query, parameters=parameters)
         items = [item async for item in results]
 
         return self._items_to_documents(items, with_embedding, query_type)
