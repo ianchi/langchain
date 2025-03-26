@@ -878,7 +878,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
             projection += ", metadata: c"
         elif isinstance(self._metadata_key, str):
             projection += (
-                f", metadata: {{ {self._metadata_key}: c.{self._metadata_key} }}"
+                f", metadata: c.{self._metadata_key} "
             )
         elif isinstance(self._metadata_key, list):
             projection += (
