@@ -535,7 +535,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         search_text: Optional[str] = None,
         **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
-        query, parameters = self._construct_query(
+        query, parameters, extra_args = self._construct_query(
             k=k,
             search_text=search_text,
             query_type=query_type,
@@ -551,6 +551,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
             query_type=query_type,
             parameters=parameters,
             with_embedding=with_embedding,
+            **extra_args,
         )
 
     async def asimilarity_search_with_score_by_vector(
@@ -580,7 +581,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
                 **kwargs,
             )
 
-        query, parameters = self._construct_query(
+        query, parameters, extra_args = self._construct_query(
             k=k,
             search_text=search_text,
             query_type=query_type,
@@ -596,6 +597,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
             query_type=query_type,
             parameters=parameters,
             with_embedding=with_embedding,
+            **extra_args,
         )
 
     def similarity_search(
@@ -785,7 +787,8 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         projection_mapping: Optional[Dict[str, Any]] = None,
         where: Optional[str] = None,
         order_by: Optional[str] = None,
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+        **kwargs: Any,
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         if query_type not in CosmosDBQueryType.__members__.values():
             raise ValueError(
                 f"Invalid query_type: {query_type}. "
@@ -855,7 +858,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
                 embeddings=embeddings,
                 projection_mapping=projection_mapping,
             )
-        return query, parameters
+        return query, parameters, kwargs
 
     def _generate_projection_fields(
         self,
@@ -877,9 +880,7 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         elif self._metadata_key == "*":
             projection += ", metadata: c"
         elif isinstance(self._metadata_key, str):
-            projection += (
-                f", metadata: c.{self._metadata_key} "
-            )
+            projection += f", metadata: c.{self._metadata_key} "
         elif isinstance(self._metadata_key, list):
             projection += (
                 ", metadata: { "
@@ -987,8 +988,11 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         query_type: CosmosDBQueryType,
         parameters: List[Dict[str, Any]],
         with_embedding: bool,
+        **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
-        items = list(self._container.query_items(query=query, parameters=parameters))
+        items = list(
+            self._container.query_items(query=query, parameters=parameters, **kwargs)
+        )
 
         return self._items_to_documents(items, with_embedding, query_type)
 
@@ -998,13 +1002,16 @@ class AzureCosmosDBNoSqlVectorSearch(VectorStore):
         query_type: CosmosDBQueryType,
         parameters: List[Dict[str, Any]],
         with_embedding: bool,
+        **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         if self._async_container is None:
             raise ValueError(
                 "Async CosmosDB client is not provided for async execution."
             )
 
-        results = self._async_container.query_items(query=query, parameters=parameters)
+        results = self._async_container.query_items(
+            query=query, parameters=parameters, **kwargs
+        )
         items = [item async for item in results]
 
         return self._items_to_documents(items, with_embedding, query_type)
